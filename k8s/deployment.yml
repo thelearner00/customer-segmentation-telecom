@@ -1,0 +1,201 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: customer-segmentation
+  labels:
+    name: customer-segmentation
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: customer-segmentation-api
+  namespace: customer-segmentation
+  labels:
+    app: customer-segmentation-api
+    version: v1
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: customer-segmentation-api
+  template:
+    metadata:
+      labels:
+        app: customer-segmentation-api
+        version: v1
+    spec:
+      containers:
+      - name: customer-segmentation-api
+        image: ghcr.io/fiza-faiz/customer-segmentation-telecom:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+          name: http
+        env:
+        - name: PYTHONPATH
+          value: "/app"
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: MODEL_PATH
+          value: "/app/output/models"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 5
+          timeoutSeconds: 5
+          failureThreshold: 2
+        volumeMounts:
+        - name: data-volume
+          mountPath: /app/data
+          readOnly: true
+        - name: models-volume
+          mountPath: /app/output/models
+      volumes:
+      - name: data-volume
+        configMap:
+          name: customer-segmentation-data
+      - name: models-volume
+        emptyDir: {}
+      imagePullSecrets:
+      - name: ghcr-secret
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: customer-segmentation-service
+  namespace: customer-segmentation
+  labels:
+    app: customer-segmentation-api
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+    name: http
+  selector:
+    app: customer-segmentation-api
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: customer-segmentation-ingress
+  namespace: customer-segmentation
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+spec:
+  tls:
+  - hosts:
+    - customer-segmentation.your-domain.com
+    secretName: customer-segmentation-tls
+  rules:
+  - host: customer-segmentation.your-domain.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: customer-segmentation-service
+            port:
+              number: 80
+
+---
+apiVersion: v1
+kind: HorizontalPodAutoscaler
+metadata:
+  name: customer-segmentation-hpa
+  namespace: customer-segmentation
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: customer-segmentation-api
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+---
+# Redis for caching (optional)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: customer-segmentation
+  labels:
+    app: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        ports:
+        - containerPort: 6379
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        livenessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 5
+          periodSeconds: 5
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+  namespace: customer-segmentation
+spec:
+  type: ClusterIP
+  ports:
+  - port: 6379
+    targetPort: 6379
+  selector:
+    app: redis

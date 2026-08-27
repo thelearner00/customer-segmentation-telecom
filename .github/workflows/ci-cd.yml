@@ -1,0 +1,390 @@
+name: 🚀 Customer Segmentation CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  release:
+    types: [ published ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ===============================
+  # Code Quality and Testing
+  # ===============================
+  test:
+    name: 🧪 Test & Quality Check
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.9, 3.10, 3.11]
+
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+
+    - name: 🐍 Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: 'pip'
+
+    - name: 📦 Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-cov black flake8 safety bandit
+
+    - name: 🎨 Code Formatting Check (Black)
+      run: black --check --diff src/ examples/
+
+    - name: 🔍 Linting (Flake8)
+      run: flake8 src/ examples/ --max-line-length=100 --ignore=E203,W503
+
+    - name: 🔒 Security Check (Bandit)
+      run: bandit -r src/ -f json -o bandit-report.json || true
+
+    - name: 🛡️ Dependency Safety Check
+      run: safety check --json --output safety-report.json || true
+
+    - name: 📊 Run Unit Tests
+      run: |
+        python -m pytest tests/ -v --cov=src --cov-report=xml --cov-report=html --cov-report=term-missing
+      env:
+        PYTHONPATH: ${{ github.workspace }}/src
+
+    - name: 📈 Upload Coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+
+    - name: 📋 Upload Test Results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: test-results-${{ matrix.python-version }}
+        path: |
+          coverage.xml
+          htmlcov/
+          bandit-report.json
+          safety-report.json
+
+  # ===============================
+  # Docker Build and Security Scan
+  # ===============================
+  docker-build:
+    name: 🐳 Build & Scan Docker Image
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+
+    - name: 🔧 Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: 🏗️ Build Docker Image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile
+        tags: |
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+        outputs: type=docker,dest=/tmp/image.tar
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: 📤 Upload Docker Image Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: docker-image
+        path: /tmp/image.tar
+
+    - name: 🔍 Run Trivy Vulnerability Scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        input: '/tmp/image.tar'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: 📋 Upload Trivy Scan Results
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  # ===============================
+  # Integration Testing
+  # ===============================
+  integration-test:
+    name: 🔗 Integration Tests
+    runs-on: ubuntu-latest
+    needs: docker-build
+    services:
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+
+    - name: 📥 Download Docker Image
+      uses: actions/download-artifact@v4
+      with:
+        name: docker-image
+        path: /tmp
+
+    - name: 🐳 Load Docker Image
+      run: docker load --input /tmp/image.tar
+
+    - name: 🚀 Start Application
+      run: |
+        docker run -d \
+          --name customer-segmentation-api \
+          --network host \
+          -e PYTHONPATH=/app \
+          -e PYTHONUNBUFFERED=1 \
+          -v ${{ github.workspace }}/data:/app/data:ro \
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+    - name: ⏳ Wait for Application
+      run: |
+        for i in {1..30}; do
+          if curl -sf http://localhost:8080/health > /dev/null; then
+            echo "✅ Application is ready"
+            break
+          fi
+          echo "⏳ Waiting for application... ($i/30)"
+          sleep 10
+        done
+
+    - name: 🧪 Run Integration Tests
+      run: |
+        # Test health endpoint
+        curl -f http://localhost:8080/health
+        
+        # Test segments summary
+        curl -f http://localhost:8080/segments/summary
+        
+        # Test model info
+        curl -f http://localhost:8080/model/info
+        
+        # Test API documentation
+        curl -f http://localhost:8080/docs
+
+    - name: 🐍 Set up Python for API Client Tests
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: 🔧 Install Client Dependencies
+      run: |
+        pip install requests
+
+    - name: 🧪 Run API Client Tests
+      run: python examples/api_client_example.py
+
+    - name: 📋 Get Application Logs
+      if: always()
+      run: docker logs customer-segmentation-api
+
+  # ===============================
+  # Build and Push to Registry
+  # ===============================
+  build-and-push:
+    name: 📤 Build & Push Container
+    runs-on: ubuntu-latest
+    needs: [test, integration-test]
+    if: github.ref == 'refs/heads/main' || github.event_name == 'release'
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+
+    - name: 🔧 Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: 🔑 Login to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: 🏷️ Extract Metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=sha,prefix=git-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: 🏗️ Build and Push Docker Image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        platforms: linux/amd64,linux/arm64
+
+  # ===============================
+  # Deploy to Staging
+  # ===============================
+  deploy-staging:
+    name: 🚀 Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: staging
+      url: https://staging.customer-segmentation.your-domain.com
+
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+
+    - name: 🚀 Deploy to Staging Server
+      uses: appleboy/ssh-action@v0.1.5
+      with:
+        host: ${{ secrets.STAGING_HOST }}
+        username: ${{ secrets.STAGING_USER }}
+        key: ${{ secrets.STAGING_SSH_KEY }}
+        script: |
+          cd /opt/customer-segmentation
+          git pull origin main
+          docker-compose --profile production pull
+          docker-compose --profile production up -d
+          docker system prune -f
+
+    - name: 🧪 Staging Health Check
+      run: |
+        sleep 30
+        curl -f https://staging.customer-segmentation.your-domain.com/health
+
+  # ===============================
+  # Deploy to Production
+  # ===============================
+  deploy-production:
+    name: 🌟 Deploy to Production
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    if: github.event_name == 'release'
+    environment:
+      name: production
+      url: https://customer-segmentation.your-domain.com
+
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+
+    - name: 🌟 Deploy to Production Server
+      uses: appleboy/ssh-action@v0.1.5
+      with:
+        host: ${{ secrets.PRODUCTION_HOST }}
+        username: ${{ secrets.PRODUCTION_USER }}
+        key: ${{ secrets.PRODUCTION_SSH_KEY }}
+        script: |
+          cd /opt/customer-segmentation
+          git fetch --tags
+          git checkout ${{ github.event.release.tag_name }}
+          docker-compose --profile production pull
+          docker-compose --profile production up -d --no-deps api
+          docker system prune -f
+
+    - name: 🧪 Production Health Check
+      run: |
+        sleep 30
+        curl -f https://customer-segmentation.your-domain.com/health
+
+    - name: 📢 Notify Deployment Success
+      uses: 8398a7/action-slack@v3
+      if: success()
+      with:
+        status: success
+        text: "✅ Customer Segmentation API ${{ github.event.release.tag_name }} deployed to production!"
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+
+  # ===============================
+  # Performance Testing
+  # ===============================
+  performance-test:
+    name: ⚡ Performance Testing
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+
+    - name: 🔧 Setup Artillery
+      run: npm install -g artillery@latest
+
+    - name: ⚡ Run Load Tests
+      run: |
+        cat > load-test.yml << EOF
+        config:
+          target: 'https://staging.customer-segmentation.your-domain.com'
+          phases:
+            - duration: 300
+              arrivalRate: 10
+              name: "Warm up"
+            - duration: 600
+              arrivalRate: 50
+              name: "Load test"
+        scenarios:
+          - name: "Health check"
+            weight: 30
+            flow:
+              - get:
+                  url: "/health"
+          - name: "Segments summary"
+            weight: 40
+            flow:
+              - get:
+                  url: "/segments/summary"
+          - name: "Model info"
+            weight: 30
+            flow:
+              - get:
+                  url: "/model/info"
+        EOF
+        
+        artillery run load-test.yml
+
+    - name: 📊 Upload Performance Results
+      uses: actions/upload-artifact@v4
+      with:
+        name: performance-results
+        path: artillery_report_*.json

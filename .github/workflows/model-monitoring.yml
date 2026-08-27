@@ -1,0 +1,326 @@
+name: 📊 Model Monitoring & Drift Detection
+
+on:
+  schedule:
+    # Run model monitoring weekly on Sundays at 3 AM UTC
+    # - cron: '0 3 * * 0'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to monitor'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+
+env:
+  PYTHON_VERSION: '3.9'
+
+jobs:
+  model-performance-check:
+    name: 🎯 Model Performance Monitoring
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+
+    - name: 🐍 Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+
+    - name: 📦 Install Dependencies
+      run: |
+        pip install -r requirements.txt
+        pip install evidently great-expectations
+
+    - name: 📊 Generate Model Performance Report
+      run: |
+        python -c "
+        import pandas as pd
+        import numpy as np
+        from datetime import datetime
+        import json
+        
+        # Simulate model performance metrics (in real scenario, fetch from monitoring system)
+        performance_data = {
+            'timestamp': datetime.now().isoformat(),
+            'model_accuracy': np.random.uniform(0.82, 0.89),
+            'silhouette_score': np.random.uniform(0.6, 0.75),
+            'api_response_time': np.random.uniform(150, 300),
+            'prediction_confidence_avg': np.random.uniform(0.7, 0.9),
+            'data_drift_score': np.random.uniform(0.1, 0.4)
+        }
+        
+        with open('model_performance.json', 'w') as f:
+            json.dump(performance_data, f, indent=2)
+            
+        print('Model Performance Metrics:')
+        for key, value in performance_data.items():
+            print(f'  {key}: {value}')
+        "
+
+    - name: 📈 Check Performance Thresholds
+      run: |
+        python -c "
+        import json
+        
+        with open('model_performance.json', 'r') as f:
+            metrics = json.load(f)
+        
+        # Define performance thresholds
+        thresholds = {
+            'model_accuracy': 0.80,
+            'silhouette_score': 0.50,
+            'api_response_time': 500,
+            'prediction_confidence_avg': 0.60,
+            'data_drift_score': 0.50
+        }
+        
+        alerts = []
+        
+        for metric, value in metrics.items():
+            if metric in thresholds:
+                threshold = thresholds[metric]
+                if metric == 'api_response_time' or metric == 'data_drift_score':
+                    # Lower is better
+                    if value > threshold:
+                        alerts.append(f'⚠️ {metric}: {value:.3f} > {threshold}')
+                else:
+                    # Higher is better
+                    if value < threshold:
+                        alerts.append(f'⚠️ {metric}: {value:.3f} < {threshold}')
+        
+        if alerts:
+            print('🚨 Performance Alerts:')
+            for alert in alerts:
+                print(f'  {alert}')
+            exit(1)
+        else:
+            print('✅ All performance metrics within acceptable ranges')
+        "
+
+    - name: 📤 Upload Performance Report
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: model-performance-report
+        path: model_performance.json
+
+  data-quality-check:
+    name: 🔍 Data Quality Monitoring
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+
+    - name: 🐍 Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: 📦 Install Dependencies
+      run: |
+        pip install pandas numpy great-expectations
+
+    - name: 🔍 Run Data Quality Checks
+      run: |
+        python -c "
+        import pandas as pd
+        import numpy as np
+        import json
+        from datetime import datetime
+        
+        # Load sample data (in real scenario, this would be recent production data)
+        df = pd.read_csv('data/telecom_customer_churn.csv')
+        
+        # Data quality checks
+        quality_report = {
+            'timestamp': datetime.now().isoformat(),
+            'total_records': len(df),
+            'missing_values_pct': (df.isnull().sum().sum() / (len(df) * len(df.columns))) * 100,
+            'duplicate_records': df.duplicated().sum(),
+            'data_types_consistent': True,  # Simplified check
+            'categorical_values_valid': True,  # Simplified check
+            'numerical_ranges_valid': True,   # Simplified check
+            'schema_drift_detected': False    # Simplified check
+        }
+        
+        # Check for potential issues
+        issues = []
+        
+        if quality_report['missing_values_pct'] > 5.0:
+            issues.append(f\"High missing values: {quality_report['missing_values_pct']:.1f}%\")
+        
+        if quality_report['duplicate_records'] > 0:
+            issues.append(f\"Duplicate records found: {quality_report['duplicate_records']}\")
+        
+        with open('data_quality_report.json', 'w') as f:
+            json.dump(quality_report, f, indent=2)
+        
+        print('Data Quality Report:')
+        for key, value in quality_report.items():
+            print(f'  {key}: {value}')
+        
+        if issues:
+            print('\\n🚨 Data Quality Issues:')
+            for issue in issues:
+                print(f'  ⚠️ {issue}')
+        else:
+            print('\\n✅ No data quality issues detected')
+        "
+
+    - name: 📤 Upload Data Quality Report
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: data-quality-report
+        path: data_quality_report.json
+
+  api-health-monitoring:
+    name: 🔗 API Health Monitoring
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event.inputs.environment != ''
+
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+
+    - name: 🔧 Set Environment URL
+      run: |
+        if [ "${{ github.event.inputs.environment }}" == "production" ]; then
+          echo "API_URL=https://customer-segmentation.your-domain.com" >> $GITHUB_ENV
+        else
+          echo "API_URL=https://staging.customer-segmentation.your-domain.com" >> $GITHUB_ENV
+        fi
+
+    - name: 🏥 Check API Health
+      run: |
+        echo "Checking API health at $API_URL"
+        
+        # Health check
+        health_response=$(curl -s -w "%{http_code}" $API_URL/health -o health.json)
+        
+        if [ "$health_response" == "200" ]; then
+          echo "✅ API health check passed"
+        else
+          echo "❌ API health check failed (HTTP $health_response)"
+          exit 1
+        fi
+
+    - name: 🧪 Run API Smoke Tests
+      run: |
+        echo "Running API smoke tests..."
+        
+        # Test segments summary
+        segments_response=$(curl -s -w "%{http_code}" $API_URL/segments/summary -o segments.json)
+        
+        if [ "$segments_response" == "200" ]; then
+          echo "✅ Segments endpoint working"
+        else
+          echo "❌ Segments endpoint failed (HTTP $segments_response)"
+          exit 1
+        fi
+        
+        # Test model info
+        model_response=$(curl -s -w "%{http_code}" $API_URL/model/info -o model_info.json)
+        
+        if [ "$model_response" == "200" ]; then
+          echo "✅ Model info endpoint working"
+        else
+          echo "❌ Model info endpoint failed (HTTP $model_response)"
+          exit 1
+        fi
+
+    - name: 📊 Performance Benchmark
+      run: |
+        echo "Running performance benchmark..."
+        
+        # Simple performance test using curl
+        times=()
+        for i in {1..10}; do
+          time=$(curl -s -w "%{time_total}" $API_URL/health -o /dev/null)
+          times+=($time)
+        done
+        
+        # Calculate average response time
+        python -c "
+        import sys
+        times = [${times[@]}]
+        avg_time = sum(times) / len(times)
+        max_time = max(times)
+        min_time = min(times)
+        
+        print(f'📊 Performance Metrics:')
+        print(f'  Average response time: {avg_time:.3f}s')
+        print(f'  Min response time: {min_time:.3f}s')  
+        print(f'  Max response time: {max_time:.3f}s')
+        
+        if avg_time > 1.0:
+            print('⚠️ Average response time exceeds 1 second')
+            sys.exit(1)
+        else:
+            print('✅ Performance within acceptable limits')
+        "
+
+  generate-monitoring-report:
+    name: 📋 Generate Monitoring Report
+    runs-on: ubuntu-latest
+    needs: [model-performance-check, data-quality-check]
+    if: always()
+
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+
+    - name: 📥 Download Reports
+      uses: actions/download-artifact@v4
+      with:
+        path: reports
+
+    - name: 📋 Generate Summary Report
+      run: |
+        python -c "
+        import json
+        import os
+        from datetime import datetime
+        
+        summary = {
+            'generated_at': datetime.now().isoformat(),
+            'reports': {}
+        }
+        
+        # Load model performance report
+        if os.path.exists('reports/model-performance-report/model_performance.json'):
+            with open('reports/model-performance-report/model_performance.json', 'r') as f:
+                summary['reports']['model_performance'] = json.load(f)
+        
+        # Load data quality report  
+        if os.path.exists('reports/data-quality-report/data_quality_report.json'):
+            with open('reports/data-quality-report/data_quality_report.json', 'r') as f:
+                summary['reports']['data_quality'] = json.load(f)
+        
+        # Save summary report
+        with open('monitoring_summary.json', 'w') as f:
+            json.dump(summary, f, indent=2)
+        
+        print('📋 Monitoring Summary Generated')
+        print(json.dumps(summary, indent=2))
+        "
+
+    - name: 📤 Upload Summary Report
+      uses: actions/upload-artifact@v4
+      with:
+        name: monitoring-summary
+        path: monitoring_summary.json
+
+    - name: 📢 Notify if Issues Found
+      if: failure()
+      run: |
+        echo "🚨 Monitoring detected issues. Check the reports for details."
+        # In a real scenario, you would send notifications via Slack, email, etc.
